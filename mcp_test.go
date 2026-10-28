@@ -156,9 +156,13 @@ func (p *fakePDS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func newTestClient(t *testing.T, srv *httptest.Server, media *mediaDir) *client.Client {
+	return newTestClientWithURLs(t, srv, media, nil)
+}
+
+func newTestClientWithURLs(t *testing.T, srv *httptest.Server, media *mediaDir, urls *imageFetcher) *client.Client {
 	t.Helper()
 	cfg := &config{Host: srv.URL, Handle: "test.example", Password: "app-password", dir: t.TempDir()}
-	c, err := client.NewInProcessClient(newMCPServer(cfg, media))
+	c, err := client.NewInProcessClient(newMCPServer(cfg, media, urls))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,8 +443,10 @@ func TestPostRejectsInvalidInputBeforeUpload(t *testing.T) {
 		{"gif", map[string]any{"text": "a", "images": []any{map[string]any{"base64": b64(gifBuf.Bytes()), "alt": "x"}}}, "unsupported image type image/gif"},
 		{"apng", map[string]any{"text": "a", "images": []any{map[string]any{"base64": b64(testAPNG(t)), "alt": "x"}}}, "animated images are not supported"},
 		{"not base64", map[string]any{"text": "a", "images": []any{map[string]any{"base64": "%%%", "alt": "x"}}}, "not valid base64"},
-		{"both sources", map[string]any{"text": "a", "images": []any{map[string]any{"base64": good, "path": "a.png", "alt": "x"}}}, "not both"},
-		{"no source", map[string]any{"text": "a", "images": []any{map[string]any{"alt": "x"}}}, "base64 or path is required"},
+		{"both sources", map[string]any{"text": "a", "images": []any{map[string]any{"base64": good, "path": "a.png", "alt": "x"}}}, "only one of"},
+		{"url and base64", map[string]any{"text": "a", "images": []any{map[string]any{"base64": good, "url": "https://example.com/a.png", "alt": "x"}}}, "only one of"},
+		{"no source", map[string]any{"text": "a", "images": []any{map[string]any{"alt": "x"}}}, "base64, url or path is required"},
+		{"urls disabled", map[string]any{"text": "a", "images": []any{map[string]any{"url": "https://example.com/a.png", "alt": "x"}}}, "image URLs are disabled"},
 		{"paths disabled", map[string]any{"text": "a", "images": []any{map[string]any{"path": "a.png", "alt": "x"}}}, "image paths are disabled"},
 		{"second image bad", map[string]any{"text": "a", "images": []any{map[string]any{"base64": good, "alt": "x"}, map[string]any{"base64": good}}}, "images[1]"},
 		{"unknown argument", map[string]any{"text": "a", "image": good}, "unknown field \"image\""},

@@ -18,6 +18,7 @@ import (
 
 type postImageArg struct {
 	Path   string `json:"path"`
+	URL    string `json:"url"`
 	Base64 string `json:"base64"`
 	Alt    string `json:"alt"`
 }
@@ -37,7 +38,11 @@ var postImageItemSchema = map[string]any{
 	"properties": map[string]any{
 		"base64": map[string]any{
 			"type":        "string",
-			"description": "Base64 image data (an optional data: URL prefix is accepted). Give exactly one of base64 or path.",
+			"description": "Base64 image data (an optional data: URL prefix is accepted). Give exactly one of base64, url or path.",
+		},
+		"url": map[string]any{
+			"type":        "string",
+			"description": "Public https:// URL that the MCP server downloads the image from, for example a raw.githubusercontent.com file. Disabled unless the server runs with --allow-image-urls.",
 		},
 		"path": map[string]any{
 			"type":        "string",
@@ -69,7 +74,7 @@ func newPostTool() mcp.Tool {
 			mcp.Description("URI of the post to quote (at:// URI or https://bsky.app post URL)"),
 		),
 		mcp.WithArray("images",
-			mcp.Description("Images to attach, in display order. Each item has alt and exactly one of base64 or path."),
+			mcp.Description("Images to attach, in display order. Each item has alt and exactly one of base64, url or path."),
 			mcp.MaxItems(maxPostImages),
 			mcp.Items(postImageItemSchema),
 		),
@@ -106,7 +111,7 @@ type preparedImage struct {
 
 // preparePostImages loads and validates all images before anything is
 // uploaded, so that one bad image does not leave a partial post.
-func preparePostImages(media *mediaDir, args []postImageArg) ([]preparedImage, error) {
+func preparePostImages(ctx context.Context, media *mediaDir, urls *imageFetcher, args []postImageArg) ([]preparedImage, error) {
 	if len(args) > maxPostImages {
 		return nil, fmt.Errorf("%d images given; a post can have at most %d", len(args), maxPostImages)
 	}
@@ -118,15 +123,23 @@ func preparePostImages(media *mediaDir, args []postImageArg) ([]preparedImage, e
 		}
 		var b []byte
 		var err error
+		sources := 0
+		for _, s := range []string{a.Base64, a.URL, a.Path} {
+			if s != "" {
+				sources++
+			}
+		}
 		switch {
-		case a.Path != "" && a.Base64 != "":
-			err = errors.New("give either base64 or path, not both")
+		case sources > 1:
+			err = errors.New("give only one of base64, url or path")
 		case a.Base64 != "":
 			b, err = decodeBase64Image(a.Base64)
+		case a.URL != "":
+			b, err = urls.fetch(ctx, a.URL)
 		case a.Path != "":
 			b, err = media.readImage(a.Path)
 		default:
-			err = errors.New("base64 or path is required")
+			err = errors.New("base64, url or path is required")
 		}
 		if err != nil {
 			return nil, fmt.Errorf("images[%d]: %w", i, err)
@@ -173,14 +186,14 @@ func buildFacets(ctx context.Context, c lexutil.LexClient, text string) []*bsky.
 	return facets
 }
 
-func createPost(ctx context.Context, c *xrpc.Client, media *mediaDir, args postArgs) (any, error) {
+func createPost(ctx context.Context, c *xrpc.Client, media *mediaDir, urls *imageFetcher, args postArgs) (any, error) {
 	if len(args.Text) > maxPostTextBytes {
 		return nil, fmt.Errorf("text is %d bytes; the limit is %d bytes", len(args.Text), maxPostTextBytes)
 	}
 	if strings.TrimSpace(args.Text) == "" && len(args.Images) == 0 {
 		return nil, errors.New("text is required unless images are attached")
 	}
-	images, err := preparePostImages(media, args.Images)
+	images, err := preparePostImages(ctx, media, urls, args.Images)
 	if err != nil {
 		return nil, err
 	}

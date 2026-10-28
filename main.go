@@ -443,10 +443,11 @@ func main() {
 				Name:        "mcp",
 				Description: "Start MCP server",
 				Usage:       "Start MCP server",
-				UsageText:   "bsky mcp [--media-dir DIR]",
+				UsageText:   "bsky mcp [--media-dir DIR] [--allow-image-urls]",
 				HelpName:    "mcp",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "media-dir", EnvVars: []string{"BSKY_MCP_MEDIA_DIR"}, Usage: "directory from which bluesky_post may read image files (paths are disabled when empty)"},
+					&cli.BoolFlag{Name: "allow-image-urls", EnvVars: []string{"BSKY_MCP_ALLOW_IMAGE_URLS"}, Usage: "let bluesky_post download images from public https URLs"},
 				},
 				Action: doMcp,
 			},
