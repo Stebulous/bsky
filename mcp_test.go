@@ -38,6 +38,7 @@ type fakePDS struct {
 	uploads     []fakeUpload
 	writes      []fakeWrite
 	beforeWrite func() // runs before a profile write is applied
+	blobMime    string // overrides the mimeType that uploadBlob reports
 }
 
 type fakeUpload struct {
@@ -85,9 +86,13 @@ func (p *fakePDS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "com.atproto.repo.uploadBlob":
 		b, _ := io.ReadAll(r.Body)
 		p.uploads = append(p.uploads, fakeUpload{ContentType: r.Header.Get("Content-Type"), Size: len(b)})
+		mime := r.Header.Get("Content-Type")
+		if p.blobMime != "" {
+			mime = p.blobMime
+		}
 		reply(map[string]any{"blob": map[string]any{
 			"$type": "blob", "ref": map[string]string{"$link": testCid(string(b))},
-			"mimeType": r.Header.Get("Content-Type"), "size": len(b),
+			"mimeType": mime, "size": len(b),
 		}})
 	case "com.atproto.repo.getRecord":
 		switch q.Get("collection") {
@@ -470,6 +475,20 @@ func TestPostImageOnlyAndDryRun(t *testing.T) {
 	}
 }
 
+func TestUnexpectedBlobResponseStopsWrite(t *testing.T) {
+	pds, srv := newFakePDS(t)
+	seedProfile(pds)
+	pds.blobMime = "application/octet-stream"
+	c := newTestClient(t, srv, nil)
+	text, isErr := callTool(t, c, "bluesky_post", map[string]any{"text": "a", "images": []any{map[string]any{"base64": b64(testPNG(t, 4, 4)), "alt": "x"}}})
+	mustFail(t, text, isErr, "PDS stored application/octet-stream")
+	text, isErr = callTool(t, c, "bluesky_update_profile", map[string]any{"expectedDid": testDid, "avatarBase64": b64(testPNG(t, 4, 4))})
+	mustFail(t, text, isErr, "PDS stored application/octet-stream")
+	if len(pds.writes) != 0 {
+		t.Errorf("a record was written after a bad upload response")
+	}
+}
+
 func TestPostImagePaths(t *testing.T) {
 	pds, srv := newFakePDS(t)
 	base := t.TempDir()
@@ -552,13 +571,16 @@ func TestUpdateProfilePreservesUnrelatedFields(t *testing.T) {
 	if len(pds.uploads) != 1 || pds.uploads[0].ContentType != "image/jpeg" {
 		t.Errorf("uploads: %+v", pds.uploads)
 	}
-	got, _ := json.Marshal(out["priorRecord"])
+	got, _ := json.Marshal(out["previousRecord"])
 	var gotRec map[string]any
 	json.Unmarshal(got, &gotRec)
 	a, _ := json.Marshal(gotRec)
 	b, _ := json.Marshal(priorRec)
-	if !bytes.Equal(a, b) || out["priorCid"] != testCid("profile-v1") || out["cid"] == "" {
-		t.Errorf("rollback data: priorCid=%v priorRecord=%s", out["priorCid"], got)
+	if !bytes.Equal(a, b) || out["previousCid"] != testCid("profile-v1") || out["cid"] == "" {
+		t.Errorf("rollback data: previousCid=%v previousRecord=%s", out["previousCid"], got)
+	}
+	if string(pds.writes[0].Body["validate"]) != "true" || get(out, "record", "displayName") != "New Name" {
+		t.Errorf("write must request validation and the result must contain the written record")
 	}
 	if changed, _ := json.Marshal(out["changed"]); string(changed) != `["banner","displayName","website"]` {
 		t.Errorf("changed = %s", changed)
@@ -603,7 +625,7 @@ func TestUpdateProfileCreatesMissingRecord(t *testing.T) {
 		t.Fatalf("writes: %+v", pds.writes)
 	}
 	rec := decodeRecord(t, pds.writes[0])
-	if rec["$type"] != profileCollection || get(rec, "avatar", "mimeType") != "image/png" || out["priorRecord"] != nil {
+	if rec["$type"] != profileCollection || get(rec, "avatar", "mimeType") != "image/png" || out["previousRecord"] != nil {
 		t.Errorf("created record: %v, result %v", rec, out)
 	}
 }

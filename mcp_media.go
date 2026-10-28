@@ -202,8 +202,8 @@ func uploadImageBlob(ctx context.Context, c lexutil.LexClient, b []byte, mime st
 	if out.Blob == nil {
 		return nil, errors.New("cannot upload image: PDS returned no blob")
 	}
-	if out.Blob.MimeType == "" {
-		out.Blob.MimeType = mime
+	if out.Blob.MimeType != mime || out.Blob.Size != int64(len(b)) {
+		return nil, fmt.Errorf("cannot upload image: PDS stored %s (%d bytes), want %s (%d bytes)", out.Blob.MimeType, out.Blob.Size, mime, len(b))
 	}
 	return out.Blob, nil
 }

@@ -132,7 +132,7 @@ Available tools:
 
 - Omitted fields and all other record fields (for example `pinnedPost` or self-labels) are kept unchanged.
 - The write uses `swapRecord`, so a profile edit made by another client after the read makes the call fail instead of overwriting it.
-- The result contains the prior record and its CID, which you can use to roll back.
+- The result contains `previousRecord` and `previousCid`, which you can use to roll back, and the written `record`.
 - Set `dryRun` to see the proposed record without uploading or writing.
 
 Example configuration for Claude Code (`~/.claude/settings.json`):

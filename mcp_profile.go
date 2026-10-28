@@ -181,10 +181,12 @@ func updateProfile(ctx context.Context, c *xrpc.Client, args profileArgs) (any, 
 		record[field] = b
 	}
 
-	result := map[string]any{"did": c.Auth.Did, "changed": changed, "priorRecord": nil, "priorCid": nil}
+	// previousRecord, previousCid and record keep the result shape of the
+	// earlier bluesky_update_profile wrapper.
+	result := map[string]any{"did": c.Auth.Did, "changed": changed, "previousRecord": nil, "previousCid": nil}
 	if prior != nil {
-		result["priorRecord"] = prior.Value
-		result["priorCid"] = *prior.Cid
+		result["previousRecord"] = prior.Value
+		result["previousCid"] = *prior.Cid
 	}
 	if args.DryRun {
 		result["dryRun"] = true
@@ -199,7 +201,7 @@ func updateProfile(ctx context.Context, c *xrpc.Client, args profileArgs) (any, 
 		Uri string `json:"uri"`
 		Cid string `json:"cid"`
 	}
-	input := map[string]any{"repo": c.Auth.Did, "collection": profileCollection, "rkey": "self", "record": record}
+	input := map[string]any{"repo": c.Auth.Did, "collection": profileCollection, "rkey": "self", "record": record, "validate": true}
 	method := "com.atproto.repo.createRecord"
 	if prior != nil {
 		input["swapRecord"] = *prior.Cid
@@ -214,5 +216,6 @@ func updateProfile(ctx context.Context, c *xrpc.Client, args profileArgs) (any, 
 	}
 	result["uri"] = out.Uri
 	result["cid"] = out.Cid
+	result["record"] = record
 	return result, nil
 }
