@@ -61,12 +61,17 @@ func doMcp(cCtx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	return server.ServeStdio(newMCPServer(cfg, media))
+	var urls *imageFetcher
+	if cCtx.Bool("allow-image-urls") {
+		urls = newImageFetcher()
+	}
+	return server.ServeStdio(newMCPServer(cfg, media, urls))
 }
 
 // newMCPServer returns the MCP server. media is the directory from which
-// bluesky_post may read image files; nil disables image paths.
-func newMCPServer(cfg *config, media *mediaDir) *server.MCPServer {
+// bluesky_post may read image files, and urls downloads images from public
+// URLs; nil disables either source.
+func newMCPServer(cfg *config, media *mediaDir, urls *imageFetcher) *server.MCPServer {
 	s := server.NewMCPServer(name, version)
 
 	// timeline
@@ -160,7 +165,7 @@ func newMCPServer(cfg *config, media *mediaDir) *server.MCPServer {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		result, err := createPost(ctx, xrpcc, media, args)
+		result, err := createPost(ctx, xrpcc, media, urls, args)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
