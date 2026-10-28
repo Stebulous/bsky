@@ -581,6 +581,20 @@ func TestUpdateProfileConcurrentEditFails(t *testing.T) {
 	}
 }
 
+func TestUpdateProfileConcurrentCreateFails(t *testing.T) {
+	pds, srv := newFakePDS(t)
+	pds.beforeWrite = func() {
+		// Another client creates the profile between the read and the write.
+		seedProfile(pds)
+	}
+	c := newTestClient(t, srv, nil)
+	text, isErr := callTool(t, c, "bluesky_update_profile", map[string]any{"expectedDid": testDid, "displayName": "mine"})
+	mustFail(t, text, isErr, "nothing was overwritten")
+	if len(pds.writes) != 0 || string(pds.profile["displayName"]) != `"Old Name"` {
+		t.Errorf("concurrently created profile was overwritten")
+	}
+}
+
 func TestUpdateProfileCreatesMissingRecord(t *testing.T) {
 	pds, srv := newFakePDS(t)
 	c := newTestClient(t, srv, nil)

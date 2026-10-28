@@ -207,7 +207,7 @@ func updateProfile(ctx context.Context, c *xrpc.Client, args profileArgs) (any, 
 	}
 	if err := c.LexDo(ctx, lexutil.Procedure, "application/json", method, nil, input, &out); err != nil {
 		var xe *xrpc.XRPCError
-		if errors.As(err, &xe) && xe.ErrStr == "InvalidSwap" {
+		if errors.As(err, &xe) && (xe.ErrStr == "InvalidSwap" || prior == nil && strings.Contains(strings.ToLower(xe.Message), "already exists")) {
 			return nil, errors.New("the profile changed after it was read; nothing was overwritten. Read the profile again and retry")
 		}
 		return nil, fmt.Errorf("cannot update profile: %w", err)
