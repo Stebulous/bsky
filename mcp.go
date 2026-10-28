@@ -57,7 +57,16 @@ func makeXRPCCFromConfig(cfg *config) (*xrpc.Client, error) {
 
 func doMcp(cCtx *cli.Context) error {
 	cfg := cCtx.App.Metadata["config"].(*config)
+	media, err := openMediaDir(cCtx.String("media-dir"))
+	if err != nil {
+		return err
+	}
+	return server.ServeStdio(newMCPServer(cfg, media))
+}
 
+// newMCPServer returns the MCP server. media is the directory from which
+// bluesky_post may read image files; nil disables image paths.
+func newMCPServer(cfg *config, media *mediaDir) *server.MCPServer {
 	s := server.NewMCPServer(name, version)
 
 	// timeline
@@ -142,148 +151,36 @@ func doMcp(cCtx *cli.Context) error {
 	})
 
 	// post
-	s.AddTool(mcp.NewTool("bluesky_post",
-		mcp.WithDescription("Create a new post on Bluesky"),
-		mcp.WithString("text",
-			mcp.Description("Text content of the post"),
-			mcp.Required(),
-		),
-		mcp.WithString("reply",
-			mcp.Description("URI of the post to reply to"),
-		),
-		mcp.WithString("quote",
-			mcp.Description("URI of the post to quote"),
-		),
-	), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.AddTool(newPostTool(), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var args postArgs
+		if err := bindStrict(request, &args); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 		xrpcc, err := makeXRPCCFromConfig(cfg)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-
-		text := mcp.ParseString(request, "text", "")
-		if strings.TrimSpace(text) == "" {
-			return mcp.NewToolResultError("text is required"), nil
-		}
-
-		post := &bsky.FeedPost{
-			Text:      text,
-			CreatedAt: time.Now().Local().Format(time.RFC3339),
-		}
-
-		// reply
-		replyTo := mcp.ParseString(request, "reply", "")
-		if replyTo != "" {
-			parts := strings.Split(replyTo, "/")
-			if len(parts) < 3 {
-				return mcp.NewToolResultError(fmt.Sprintf("invalid post uri: %q", replyTo)), nil
-			}
-			rkey := parts[len(parts)-1]
-			collection := parts[len(parts)-2]
-			did := parts[2]
-
-			resp, err := comatproto.RepoGetRecord(ctx, xrpcc, "", collection, did, rkey)
-			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("cannot get record: %v", err)), nil
-			}
-			orig := resp.Value.Val.(*bsky.FeedPost)
-			reply := &bsky.FeedPost_ReplyRef{
-				Root:   &comatproto.RepoStrongRef{Cid: *resp.Cid, Uri: resp.Uri},
-				Parent: &comatproto.RepoStrongRef{Cid: *resp.Cid, Uri: resp.Uri},
-			}
-			if orig.Reply != nil && orig.Reply.Root != nil {
-				reply.Root = &comatproto.RepoStrongRef{Cid: orig.Reply.Root.Cid, Uri: orig.Reply.Root.Uri}
-			}
-			post.Reply = reply
-		}
-
-		// quote
-		quoteTo := mcp.ParseString(request, "quote", "")
-		if quoteTo != "" {
-			parts := strings.Split(quoteTo, "/")
-			if len(parts) < 3 {
-				return mcp.NewToolResultError(fmt.Sprintf("invalid post uri: %q", quoteTo)), nil
-			}
-			rkey := parts[len(parts)-1]
-			collection := parts[len(parts)-2]
-			did := parts[2]
-
-			resp, err := comatproto.RepoGetRecord(ctx, xrpcc, "", collection, did, rkey)
-			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("cannot get record: %v", err)), nil
-			}
-			if post.Embed == nil {
-				post.Embed = &bsky.FeedPost_Embed{}
-			}
-			post.Embed.EmbedRecord = &bsky.EmbedRecord{
-				Record: &comatproto.RepoStrongRef{Cid: *resp.Cid, Uri: resp.Uri},
-			}
-		}
-
-		// facets
-		for _, entry := range extractLinksBytes(text) {
-			post.Facets = append(post.Facets, &bsky.RichtextFacet{
-				Features: []*bsky.RichtextFacet_Features_Elem{
-					{
-						RichtextFacet_Link: &bsky.RichtextFacet_Link{
-							Uri: entry.text,
-						},
-					},
-				},
-				Index: &bsky.RichtextFacet_ByteSlice{
-					ByteStart: entry.start,
-					ByteEnd:   entry.end,
-				},
-			})
-		}
-
-		for _, entry := range extractMentionsBytes(text) {
-			profile, err := bsky.ActorGetProfile(ctx, xrpcc, entry.text)
-			if err != nil {
-				continue
-			}
-			post.Facets = append(post.Facets, &bsky.RichtextFacet{
-				Features: []*bsky.RichtextFacet_Features_Elem{
-					{
-						RichtextFacet_Mention: &bsky.RichtextFacet_Mention{
-							Did: profile.Did,
-						},
-					},
-				},
-				Index: &bsky.RichtextFacet_ByteSlice{
-					ByteStart: entry.start,
-					ByteEnd:   entry.end,
-				},
-			})
-		}
-
-		for _, entry := range extractTagsBytes(text) {
-			post.Facets = append(post.Facets, &bsky.RichtextFacet{
-				Features: []*bsky.RichtextFacet_Features_Elem{
-					{
-						RichtextFacet_Tag: &bsky.RichtextFacet_Tag{
-							Tag: entry.text,
-						},
-					},
-				},
-				Index: &bsky.RichtextFacet_ByteSlice{
-					ByteStart: entry.start,
-					ByteEnd:   entry.end,
-				},
-			})
-		}
-
-		resp, err := comatproto.RepoCreateRecord(ctx, xrpcc, &comatproto.RepoCreateRecord_Input{
-			Collection: "app.bsky.feed.post",
-			Repo:       xrpcc.Auth.Did,
-			Record:     &lexutil.LexiconTypeDecoder{Val: post},
-		})
+		result, err := createPost(ctx, xrpcc, media, args)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("cannot create post: %v", err)), nil
+			return mcp.NewToolResultError(err.Error()), nil
 		}
+		b, _ := json.MarshalIndent(result, "", "  ")
+		return mcp.NewToolResultText(string(b)), nil
+	})
 
-		result := map[string]string{
-			"uri": resp.Uri,
-			"cid": resp.Cid,
+	// update-profile
+	s.AddTool(newUpdateProfileTool(), func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var args profileArgs
+		if err := bindStrict(request, &args); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		xrpcc, err := makeXRPCCFromConfig(cfg)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		result, err := updateProfile(ctx, xrpcc, args)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 		b, _ := json.MarshalIndent(result, "", "  ")
 		return mcp.NewToolResultText(string(b)), nil
@@ -650,7 +547,7 @@ func doMcp(cCtx *cli.Context) error {
 		return mcp.NewToolResultText(string(b)), nil
 	})
 
-	return server.ServeStdio(s)
+	return s
 }
 
 func threadPostToMap(p *bsky.FeedDefs_PostView) map[string]any {
