@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -34,6 +35,11 @@ func newImageHost(t *testing.T) (*httptest.Server, *imageFetcher) {
 			http.Redirect(w, r, "http://"+r.Host+"/widget.png", http.StatusFound)
 		case "/to-widget":
 			http.Redirect(w, r, "/widget.png", http.StatusFound)
+		case "/r1", "/r2", "/r3":
+			n := r.URL.Path[2] - '0'
+			http.Redirect(w, r, fmt.Sprintf("/r%d", n+1), http.StatusFound)
+		case "/r4":
+			http.Redirect(w, r, "/widget.png", http.StatusFound)
 		case "/loop":
 			http.Redirect(w, r, "/loop", http.StatusFound)
 		default:
@@ -52,11 +58,11 @@ func TestPostImageURL(t *testing.T) {
 		return callTool(t, c, "bluesky_post", map[string]any{"text": "a", "images": []any{map[string]any{"url": u, "alt": "Widget"}}})
 	}
 
-	for _, u := range []string{host.URL + "/widget.png", host.URL + "/to-widget"} {
+	for _, u := range []string{host.URL + "/widget.png", host.URL + "/to-widget", host.URL + "/r2"} {
 		text, isErr := post(u)
 		mustOK(t, text, isErr)
 	}
-	if len(pds.uploads) != 2 || pds.uploads[0].ContentType != "image/png" {
+	if len(pds.uploads) != 3 || pds.uploads[0].ContentType != "image/png" {
 		t.Fatalf("uploads: %+v", pds.uploads)
 	}
 	if img := get(decodeRecord(t, pds.writes[0]), "embed", "images", 0); get(img, "aspectRatio", "width") != float64(30) || get(img, "alt") != "Widget" {
@@ -69,6 +75,7 @@ func TestPostImageURL(t *testing.T) {
 		{"/missing.png", "HTTP 404"},
 		{"/to-http", "must be an absolute https:// URL"},
 		{"/loop", "too many redirects"},
+		{"/r1", "too many redirects"}, // 4 redirects
 	} {
 		text, isErr := post(host.URL + tc.path)
 		mustFail(t, text, isErr, tc.want)
@@ -84,7 +91,7 @@ func TestPostImageURL(t *testing.T) {
 			t.Errorf("error message leaks URL credentials: %s", text)
 		}
 	}
-	if len(pds.uploads) != 2 || len(pds.writes) != 2 {
+	if len(pds.uploads) != 3 || len(pds.writes) != 3 {
 		t.Errorf("rejected URLs reached the PDS: %d uploads, %d writes", len(pds.uploads), len(pds.writes))
 	}
 }
@@ -128,6 +135,8 @@ func TestIsPublicAddr(t *testing.T) {
 		"::ffff:100.64.0.1":   false,
 		"64:ff9b::a00:1":      false,
 		"2002:a00:1::":        false,
+		"::7f00:1":            false, // IPv4-compatible 127.0.0.1
+		"2001:0:4136:e378::1": false, // Teredo
 	} {
 		if got := isPublicAddr(netip.MustParseAddr(addr)); got != want {
 			t.Errorf("isPublicAddr(%s) = %v, want %v", addr, got, want)

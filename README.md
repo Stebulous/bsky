@@ -120,7 +120,7 @@ Available tools:
 ```
 
 - Images must be static PNG, JPEG or WebP, up to 1,000,000 bytes each. The type is detected from the content and the aspect ratio is set automatically. Oversized images are rejected; they are not recompressed.
-- `url` makes the server download the image from a public `https://` URL, for example `https://raw.githubusercontent.com/OWNER/REPO/main/docs/screenshot.png`. URLs are disabled by default. To enable them, start the server with `bsky mcp --allow-image-urls` (or set `BSKY_MCP_ALLOW_IMAGE_URLS=true`). The server connects only to public addresses on port 443, follows at most 3 redirects, which must stay on `https`, and reads at most 1,000,000 bytes.
+- `url` makes the server download the image from a public `https://` URL, for example `https://raw.githubusercontent.com/OWNER/REPO/main/docs/screenshot.png`. URLs are disabled by default. To enable them, start the server with `bsky mcp --allow-image-urls` (or set `BSKY_MCP_ALLOW_IMAGE_URLS=true`). The server connects only to public addresses on port 443, follows at most 3 redirects, which must stay on `https`, and reads at most 1,000,000 bytes. Each download times out after 30 seconds, so a post with 4 image URLs can take up to 2 minutes before its uploads start in the worst case.
 - `path` reads a file on the machine that runs the server. Paths are disabled by default. To enable them, start the server with `bsky mcp --media-dir DIR` (or set `BSKY_MCP_MEDIA_DIR`); only regular files inside `DIR` can be read.
 - Images work with `reply` and `quote`. A quote with images uses an `app.bsky.embed.recordWithMedia` embed.
 - `reply` and `quote` accept an `at://` URI or a `https://bsky.app/profile/.../post/...` URL.

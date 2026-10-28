@@ -23,6 +23,7 @@ type imageFetcher struct {
 // internet, or that can map to such addresses, in addition to the ranges
 // that netip.Addr methods already report.
 var nonPublicPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("::/96"), // IPv4-compatible
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("100.64.0.0/10"),
 	netip.MustParsePrefix("192.0.0.0/24"),
@@ -33,6 +34,7 @@ var nonPublicPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("240.0.0.0/4"),
 	netip.MustParsePrefix("64:ff9b::/96"),
 	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2001::/32"), // Teredo
 	netip.MustParsePrefix("2001:db8::/32"),
 	netip.MustParsePrefix("2002::/16"),
 }
@@ -85,7 +87,8 @@ func newImageHTTPClient(transport http.RoundTripper) *http.Client {
 		Transport: transport,
 		Timeout:   30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 3 {
+			// via holds the original request and the redirects so far.
+			if len(via) > 3 {
 				return errors.New("too many redirects")
 			}
 			return checkImageURL(req.URL)
