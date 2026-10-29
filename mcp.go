@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -19,8 +20,12 @@ import (
 )
 
 func makeXRPCCFromConfig(cfg *config) (*xrpc.Client, error) {
+	return makeXRPCCFromConfigContext(context.Background(), cfg, cliutil.NewHttpClient())
+}
+
+func makeXRPCCFromConfigContext(ctx context.Context, cfg *config, httpClient *http.Client) (*xrpc.Client, error) {
 	xrpcc := &xrpc.Client{
-		Client: cliutil.NewHttpClient(),
+		Client: httpClient,
 		Host:   cfg.Host,
 		Auth:   &xrpc.AuthInfo{Handle: cfg.Handle},
 	}
@@ -29,7 +34,7 @@ func makeXRPCCFromConfig(cfg *config) (*xrpc.Client, error) {
 	if err == nil {
 		xrpcc.Auth = auth
 		xrpcc.Auth.AccessJwt = xrpcc.Auth.RefreshJwt
-		refresh, err2 := comatproto.ServerRefreshSession(context.TODO(), xrpcc)
+		refresh, err2 := comatproto.ServerRefreshSession(ctx, xrpcc)
 		if err2 != nil {
 			err = err2
 		} else {
@@ -39,11 +44,14 @@ func makeXRPCCFromConfig(cfg *config) (*xrpc.Client, error) {
 		}
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		input := &comatproto.ServerCreateSession_Input{
 			Identifier: xrpcc.Auth.Handle,
 			Password:   cfg.Password,
 		}
-		auth, err := comatproto.ServerCreateSession(context.TODO(), xrpcc, input)
+		auth, err := comatproto.ServerCreateSession(ctx, xrpcc, input)
 		if err != nil {
 			return nil, fmt.Errorf("cannot create session: %w", err)
 		}
@@ -552,6 +560,7 @@ func newMCPServer(cfg *config, media *mediaDir, urls *imageFetcher) *server.MCPS
 		return mcp.NewToolResultText(string(b)), nil
 	})
 
+	registerChatTools(s, func(ctx context.Context) (*xrpc.Client, error) { return makeMCPChatClient(ctx, cfg) })
 	return s
 }
 
