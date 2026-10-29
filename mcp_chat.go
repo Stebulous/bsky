@@ -12,6 +12,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/bluesky-social/indigo/api/chat"
+	"github.com/bluesky-social/indigo/atproto/syntax"
+	cliutil "github.com/bluesky-social/indigo/util/cliutil"
 	"github.com/bluesky-social/indigo/xrpc"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -20,26 +22,74 @@ import (
 // Resolve only the authenticated account's PDS. Never accept a chat host from
 // tool arguments, and never send session credentials to the DID directory.
 func makeMCPChatClient(ctx context.Context, cfg *config) (*xrpc.Client, error) {
-	c, err := makeXRPCCFromConfig(cfg)
+	c, err := makeXRPCCFromConfigContext(ctx, cfg, newChatAuthHTTPClient())
 	if err != nil {
 		return nil, err
 	}
-	did := c.Auth.Did
-	var endpoint string
-	switch {
-	case strings.HasPrefix(did, "did:plc:"):
-		endpoint = "https://plc.directory/" + url.PathEscape(did)
-	case strings.HasPrefix(did, "did:web:") && !strings.Contains(strings.TrimPrefix(did, "did:web:"), ":"):
-		endpoint = "https://" + strings.TrimPrefix(did, "did:web:") + "/.well-known/did.json"
-	default:
-		return nil, fmt.Errorf("unsupported authenticated DID")
+	return resolveChatPDS(ctx, c, newChatHTTPClient(newImageFetcher().client.Transport))
+}
+
+// Preserve configured authentication entryways and proxy settings. Credentials
+// still never follow redirects, and authentication shares the request deadline.
+func newChatAuthHTTPClient() *http.Client {
+	return newChatHTTPClient(cliutil.NewHttpClient().Transport)
+}
+
+// Chat identity and API requests never follow redirects, even on the same host.
+func newChatHTTPClient(transport http.RoundTripper) *http.Client {
+	return &http.Client{Transport: transport, Timeout: 30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+}
+
+func chatDIDEndpoint(did string) (string, error) {
+	if strings.HasPrefix(did, "did:plc:") {
+		return "https://plc.directory/" + url.PathEscape(did), nil
 	}
-	fetcher := newImageFetcher()
+	if !strings.HasPrefix(did, "did:web:") {
+		return "", fmt.Errorf("unsupported authenticated DID")
+	}
+	parts := strings.Split(strings.TrimPrefix(did, "did:web:"), ":")
+	host, err := url.PathUnescape(parts[0])
+	if err != nil || strings.ContainsAny(host, "/?#@%\\") {
+		return "", fmt.Errorf("invalid did:web host")
+	}
+	u, err := url.Parse("https://" + host)
+	if err != nil || checkImageURL(u) != nil || u.Opaque != "" || u.Hostname() == "" {
+		return "", fmt.Errorf("invalid did:web host")
+	}
+	if _, err := syntax.ParseHandle(u.Hostname()); err != nil || strings.HasSuffix(host, ":") {
+		return "", fmt.Errorf("did:web requires a domain name")
+	}
+	// The public-address dialer permits only port 443, including for did:web.
+	if u.Port() != "" && u.Port() != "443" {
+		return "", fmt.Errorf("did:web supports only HTTPS port 443")
+	}
+	path := "/.well-known"
+	if len(parts) > 1 {
+		path = ""
+		for _, part := range parts[1:] {
+			segment, err := url.PathUnescape(part)
+			if err != nil || segment == "" || segment == "." || segment == ".." || strings.ContainsAny(segment, "/\\?#@%") {
+				return "", fmt.Errorf("invalid did:web path")
+			}
+			path += "/" + segment
+		}
+	}
+	u.Path = path + "/did.json"
+	return u.String(), nil
+}
+
+func resolveChatPDS(ctx context.Context, c *xrpc.Client, resolver *http.Client) (*xrpc.Client, error) {
+	did := c.Auth.Did
+	endpoint, err := chatDIDEndpoint(did)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := fetcher.client.Do(req)
+	resp, err := resolver.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve chat PDS: %w", err)
 	}
@@ -51,7 +101,14 @@ func makeMCPChatClient(ctx context.Context, cfg *config) (*xrpc.Client, error) {
 		ID      string       `json:"id"`
 		Service []didService `json:"service"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&doc); err != nil {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > 1<<20 {
+		return nil, fmt.Errorf("DID document exceeds 1 MiB")
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, err
 	}
 	if doc.ID != did {
@@ -65,8 +122,7 @@ func makeMCPChatClient(ctx context.Context, cfg *config) (*xrpc.Client, error) {
 			}
 			c.Host = strings.TrimRight(svc.ServiceEndpoint, "/")
 			// Public HTTPS only, no redirects carrying the authorization header.
-			c.Client = newImageFetcher().client
-			c.Client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+			c.Client = newChatHTTPClient(newImageFetcher().client.Transport)
 			c.Headers = map[string]string{"Atproto-Proxy": "did:web:api.bsky.chat#bsky_chat"}
 			return c, nil
 		}
@@ -98,7 +154,7 @@ func registerChatTools(s *server.MCPServer, factory chatClientFactory) {
 		default:
 			desc := "Mark a conversation read through the specified message."
 			if name == "bluesky_dm_send" {
-				desc = "Send plain text to an existing conversation. Requires operator approval of message and recipients. dryRun previews without sending. Never retry an ambiguous send automatically."
+				desc = "Send plain text to an existing conversation. The calling host must obtain operator approval of message and recipients; this server does not verify approval. dryRun previews without sending. Never retry an ambiguous send automatically."
 			}
 			opts = append(opts, mcp.WithDescription(desc), mcp.WithString("convoId", mcp.Required()), mcp.WithString("expectedDid", mcp.Required(), mcp.Description("Authenticated account DID; guards against using the wrong account.")), mcp.WithBoolean("dryRun"), mcp.WithReadOnlyHintAnnotation(false), mcp.WithIdempotentHintAnnotation(name == "bluesky_dm_mark_read"))
 			if name == "bluesky_dm_send" {
