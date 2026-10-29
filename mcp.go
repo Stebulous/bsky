@@ -552,6 +552,7 @@ func newMCPServer(cfg *config, media *mediaDir, urls *imageFetcher) *server.MCPS
 		return mcp.NewToolResultText(string(b)), nil
 	})
 
+	registerChatTools(s, func(ctx context.Context) (*xrpc.Client, error) { return makeMCPChatClient(ctx, cfg) })
 	return s
 }
 
