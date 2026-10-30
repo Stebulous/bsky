@@ -131,13 +131,14 @@ func resolveChatPDS(ctx context.Context, c *xrpc.Client, resolver *http.Client) 
 }
 
 type chatToolArgs struct {
-	ConvoID     string `json:"convoId"`
-	Cursor      string `json:"cursor"`
-	Limit       int64  `json:"limit"`
-	Text        string `json:"text"`
-	ExpectedDID string `json:"expectedDid"`
-	MessageID   string `json:"messageId"`
-	DryRun      bool   `json:"dryRun"`
+	ConvoID         string   `json:"convoId"`
+	Cursor          string   `json:"cursor"`
+	Limit           int64    `json:"limit"`
+	Text            string   `json:"text"`
+	ExpectedDID     string   `json:"expectedDid"`
+	ExpectedMembers []string `json:"expectedMembers"`
+	MessageID       string   `json:"messageId"`
+	DryRun          bool     `json:"dryRun"`
 }
 
 type chatClientFactory func(context.Context) (*xrpc.Client, error)
@@ -152,13 +153,13 @@ func registerChatTools(s *server.MCPServer, factory chatClientFactory) {
 		case "bluesky_dm_messages":
 			opts = append(opts, mcp.WithDescription("Read one bounded page of messages without marking them read."+warning), mcp.WithString("convoId", mcp.Required()), mcp.WithString("cursor"), mcp.WithNumber("limit", mcp.DefaultNumber(20)), mcp.WithReadOnlyHintAnnotation(true))
 		default:
-			desc := "Mark a conversation read through the specified message."
+			desc := "Mark a conversation read through the specified message. The calling host must obtain operator approval before changing read status; this server does not verify approval. dryRun previews without changing read status. Authentication may still refresh or create a session."
 			if name == "bluesky_dm_send" {
-				desc = "Send plain text to an existing conversation. The calling host must obtain operator approval of message and recipients; this server does not verify approval. dryRun previews without sending. Never retry an ambiguous send automatically."
+				desc = "Send plain text only to an existing direct conversation with exactly two members. expectedMembers must match the approved full DID set, including your account, at send time. The calling host must obtain operator approval of message and recipients; this server does not verify approval. dryRun previews without sending; authentication may still refresh or create a session. Never retry an ambiguous send automatically."
 			}
 			opts = append(opts, mcp.WithDescription(desc), mcp.WithString("convoId", mcp.Required()), mcp.WithString("expectedDid", mcp.Required(), mcp.Description("Authenticated account DID; guards against using the wrong account.")), mcp.WithBoolean("dryRun"), mcp.WithReadOnlyHintAnnotation(false), mcp.WithIdempotentHintAnnotation(name == "bluesky_dm_mark_read"))
 			if name == "bluesky_dm_send" {
-				opts = append(opts, mcp.WithString("text", mcp.Required()))
+				opts = append(opts, mcp.WithString("text", mcp.Required()), mcp.WithArray("expectedMembers", mcp.WithStringItems(mcp.MaxLength(2048)), mcp.MinItems(2), mcp.MaxItems(2), mcp.UniqueItems(true), mcp.Description("Approved full conversation member DID set including expectedDid; required unless dryRun=true.")))
 			} else {
 				opts = append(opts, mcp.WithString("messageId", mcp.Required()))
 			}
@@ -191,8 +192,11 @@ func registerChatTools(s *server.MCPServer, factory chatClientFactory) {
 				convo, err = chat.ConvoGetConvo(ctx, c, a.ConvoID)
 				if err == nil {
 					if a.DryRun {
-						out = map[string]any{"dryRun": true, "accountDid": a.ExpectedDID, "conversation": convo.Convo, "text": a.Text, "messageId": a.MessageID, "notice": "Preview only; no message sent or read status changed."}
+						out = map[string]any{"dryRun": true, "accountDid": a.ExpectedDID, "conversation": convo.Convo, "text": a.Text, "messageId": a.MessageID, "notice": "Preview only; no message sent or read status changed. Authentication may have refreshed or created a session."}
 					} else if toolName == "bluesky_dm_send" {
+						if err := checkChatSendMembers(convo.Convo, a); err != nil {
+							return mcp.NewToolResultError("send blocked before write: " + err.Error()), nil
+						}
 						out, err = chat.ConvoSendMessage(ctx, c, &chat.ConvoSendMessage_Input{ConvoId: a.ConvoID, Message: &chat.ConvoDefs_MessageInput{Text: a.Text}})
 					} else {
 						out, err = chat.ConvoUpdateRead(ctx, c, &chat.ConvoUpdateRead_Input{ConvoId: a.ConvoID, MessageId: &a.MessageID})
@@ -223,7 +227,7 @@ func parseChatArgs(name string, req mcp.CallToolRequest) (chatToolArgs, error) {
 	case "bluesky_dm_messages":
 		allowed = map[string]bool{"convoId": true, "cursor": true, "limit": true}
 	case "bluesky_dm_send":
-		allowed = map[string]bool{"convoId": true, "expectedDid": true, "text": true, "dryRun": true}
+		allowed = map[string]bool{"convoId": true, "expectedDid": true, "expectedMembers": true, "text": true, "dryRun": true}
 	case "bluesky_dm_mark_read":
 		allowed = map[string]bool{"convoId": true, "expectedDid": true, "messageId": true, "dryRun": true}
 	}
@@ -254,8 +258,51 @@ func parseChatArgs(name string, req mcp.CallToolRequest) (chatToolArgs, error) {
 	if name == "bluesky_dm_send" && (!utf8.ValidString(a.Text) || strings.TrimSpace(a.Text) == "" || len(a.Text) > 10000 || utf8.RuneCountInString(a.Text) > 1000) {
 		return a, fmt.Errorf("text must be nonempty valid UTF-8, at most 1000 code points and 10000 bytes")
 	}
+	if name == "bluesky_dm_send" && (!a.DryRun || a.ExpectedMembers != nil) {
+		if len(a.ExpectedMembers) != 2 || a.ExpectedMembers[0] == a.ExpectedMembers[1] {
+			return a, fmt.Errorf("expectedMembers must contain the two distinct approved DIDs")
+		}
+		hasAccount := false
+		for _, member := range a.ExpectedMembers {
+			if len(member) > 2048 {
+				return a, fmt.Errorf("expectedMembers DID too long")
+			}
+			if _, err := syntax.ParseDID(member); err != nil {
+				return a, fmt.Errorf("expectedMembers must contain valid DIDs")
+			}
+			hasAccount = hasAccount || member == a.ExpectedDID
+		}
+		if !hasAccount {
+			return a, fmt.Errorf("expectedMembers must include expectedDid")
+		}
+	}
 	if name == "bluesky_dm_mark_read" && (strings.TrimSpace(a.MessageID) == "" || len(a.MessageID) > 512) {
 		return a, fmt.Errorf("messageId required (max 512 bytes)")
 	}
 	return a, nil
+}
+
+// Direct-conversation members are immutable in the chat API. Group member views
+// may be partial and mutable, so neither a group nor an unknown kind is sendable.
+func checkChatSendMembers(convo *chat.ConvoDefs_ConvoView, a chatToolArgs) error {
+	if convo == nil || convo.Id != a.ConvoID || convo.Kind == nil || convo.Kind.ConvoDefs_DirectConvo == nil || convo.Kind.ConvoDefs_GroupConvo != nil {
+		return fmt.Errorf("only an explicitly direct conversation is supported")
+	}
+	if len(convo.Members) != 2 || len(a.ExpectedMembers) != 2 {
+		return fmt.Errorf("expected two conversation members")
+	}
+	actual := make(map[string]bool, 2)
+	for _, member := range convo.Members {
+		if member == nil || member.Did == "" || actual[member.Did] {
+			return fmt.Errorf("invalid conversation members")
+		}
+		actual[member.Did] = true
+	}
+	if !actual[a.ExpectedDID] {
+		return fmt.Errorf("account is not a conversation member")
+	}
+	if a.ExpectedMembers[0] == a.ExpectedMembers[1] || !actual[a.ExpectedMembers[0]] || !actual[a.ExpectedMembers[1]] {
+		return fmt.Errorf("conversation members do not match approved expectedMembers")
+	}
+	return nil
 }

@@ -23,6 +23,10 @@ import (
 
 func TestDMPreviewAndReadsDoNotWrite(t *testing.T) {
 	var writes, reads int
+	recipient := "did:plc:recipient"
+	kind := map[string]any{"$type": "chat.bsky.convo.defs#directConvo"}
+	members := []any{map[string]any{"did": testDid}, map[string]any{"did": recipient}}
+	convoID := "one"
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Atproto-Proxy") != "did:web:api.bsky.chat#bsky_chat" {
 			t.Error("missing proxy header")
@@ -42,7 +46,7 @@ func TestDMPreviewAndReadsDoNotWrite(t *testing.T) {
 		case "chat.bsky.convo.getMessages":
 			json.NewEncoder(w).Encode(map[string]any{"messages": []any{}, "cursor": "older"})
 		case "chat.bsky.convo.getConvo", "chat.bsky.convo.updateRead":
-			json.NewEncoder(w).Encode(map[string]any{"convo": map[string]any{"id": "one", "members": []any{}, "rev": "1", "muted": false, "unreadCount": 1}})
+			json.NewEncoder(w).Encode(map[string]any{"convo": map[string]any{"id": convoID, "kind": kind, "members": members, "rev": "1", "muted": false, "unreadCount": 1}})
 		case "chat.bsky.convo.sendMessage":
 			json.NewEncoder(w).Encode(map[string]any{"id": "new", "rev": "2", "text": "approved", "sender": map[string]any{"did": testDid}, "sentAt": "2026-10-29T00:00:00Z"})
 		default:
@@ -89,7 +93,44 @@ func TestDMPreviewAndReadsDoNotWrite(t *testing.T) {
 	if writes != 0 {
 		t.Fatal("invalid request wrote")
 	}
-	callOK(t, c, "bluesky_dm_send", map[string]any{"convoId": "one", "expectedDid": testDid, "text": "approved"})
+	// A preview is not authority to send to a changed or group member set.
+	approved := []string{recipient, testDid}
+	sendArgs := func(expected any) map[string]any {
+		return map[string]any{"convoId": "one", "expectedDid": testDid, "text": "approved", "expectedMembers": expected}
+	}
+	for _, expected := range []any{nil, []string{}, []string{testDid}, []string{testDid, testDid}, []string{recipient, "did:plc:third"}, []string{testDid, "not-a-did"}, []string{testDid, recipient, "did:plc:third"}} {
+		if _, isErr := callTool(t, c, "bluesky_dm_send", sendArgs(expected)); !isErr {
+			t.Fatalf("accepted invalid approval set: %v", expected)
+		}
+	}
+	validMembers := members
+	for _, changed := range []struct {
+		name    string
+		kind    map[string]any
+		members []any
+		id      string
+	}{
+		{"switched recipient", kind, []any{map[string]any{"did": testDid}, map[string]any{"did": "did:plc:third"}}, "one"},
+		{"two-member group", map[string]any{"$type": "chat.bsky.convo.defs#groupConvo"}, validMembers, "one"},
+		{"unknown kind", map[string]any{"$type": "chat.bsky.convo.defs#futureKind"}, validMembers, "one"},
+		{"missing kind", nil, validMembers, "one"},
+		{"three members", kind, append(append([]any{}, validMembers...), map[string]any{"did": "did:plc:third"}), "one"},
+		{"missing account", kind, []any{map[string]any{"did": recipient}, map[string]any{"did": "did:plc:third"}}, "one"},
+		{"duplicate", kind, []any{map[string]any{"did": testDid}, map[string]any{"did": testDid}}, "one"},
+		{"null member", kind, []any{map[string]any{"did": testDid}, nil}, "one"},
+		{"wrong conversation", kind, validMembers, "other"},
+	} {
+		kind, members, convoID = changed.kind, changed.members, changed.id
+		if _, isErr := callTool(t, c, "bluesky_dm_send", sendArgs(approved)); !isErr {
+			t.Errorf("%s was accepted", changed.name)
+		}
+		if writes != 0 {
+			t.Fatalf("%s caused a POST", changed.name)
+		}
+	}
+	kind = map[string]any{"$type": "chat.bsky.convo.defs#directConvo"}
+	members, convoID = validMembers, "one"
+	callOK(t, c, "bluesky_dm_send", sendArgs(approved))
 	if writes != 1 {
 		t.Fatalf("send writes %d", writes)
 	}
